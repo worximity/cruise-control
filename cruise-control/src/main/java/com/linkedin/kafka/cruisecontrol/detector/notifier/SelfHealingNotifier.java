@@ -153,6 +153,16 @@ public class SelfHealingNotifier implements AnomalyNotifier {
     }
   }
 
+  private synchronized long enabledTimeMs(AnomalyType anomalyType, long nowMs) {
+    long enabledTimeMs = _selfHealingEnabledHistoricalDurationMs.get(anomalyType);
+    if (_selfHealingEnabled.get(anomalyType)) {
+      // Add current duration during which the self-healing is enabled.
+      Long currentEnabledSelfHealingStartTime = _selfHealingStateChangeTimeMs.get(true).get(anomalyType);
+      enabledTimeMs += nowMs - (currentEnabledSelfHealingStartTime == null ? _notifierStartTimeMs : currentEnabledSelfHealingStartTime);
+    }
+    return enabledTimeMs;
+  }
+
   @Override
   public synchronized Map<AnomalyType, Float> selfHealingEnabledRatio() {
     Map<AnomalyType, Float> selfHealingEnabledRatio = new HashMap<>(_selfHealingEnabled.size());
@@ -160,11 +170,7 @@ public class SelfHealingNotifier implements AnomalyNotifier {
     long uptimeMs = uptimeMs(nowMs);
 
     for (AnomalyType anomalyType : AnomalyType.cachedValues()) {
-      long enabledTimeMs = _selfHealingEnabledHistoricalDurationMs.get(anomalyType);
-      if (_selfHealingEnabled.get(anomalyType)) {
-        // Add current duration during which the self-healing is enabled.
-        enabledTimeMs += nowMs - _selfHealingStateChangeTimeMs.get(false).get(anomalyType);
-      }
+      long enabledTimeMs = enabledTimeMs(anomalyType, nowMs);
       selfHealingEnabledRatio.put(anomalyType, ((float) enabledTimeMs / uptimeMs));
     }
 

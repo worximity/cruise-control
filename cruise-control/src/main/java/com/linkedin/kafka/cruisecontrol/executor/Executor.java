@@ -295,6 +295,8 @@ public class Executor {
    * @param requestedLeadershipMovementConcurrency The maximum number of concurrent leader movements
    *                                               (if null, use num.concurrent.leader.movements).
    * @param replicaMovementStrategy The strategy used to determine the execution order of generated replica movement tasks.
+   * @param replicationThrottle The replication throttle (bytes/second) to apply to both leaders and followers
+   *                            when executing a proposal (if null, no throttling is applied).
    * @param uuid UUID of the execution.
    */
   public synchronized void executeProposals(Collection<ExecutionProposal> proposals,
@@ -305,11 +307,12 @@ public class Executor {
                                             Integer requestedIntraBrokerPartitionMovementConcurrency,
                                             Integer requestedLeadershipMovementConcurrency,
                                             ReplicaMovementStrategy replicaMovementStrategy,
+                                            Long replicationThrottle,
                                             String uuid) {
     initProposalExecution(proposals, unthrottledBrokers, loadMonitor, requestedInterBrokerPartitionMovementConcurrency,
                           requestedIntraBrokerPartitionMovementConcurrency, requestedLeadershipMovementConcurrency,
                           replicaMovementStrategy, uuid);
-    startExecution(loadMonitor, null, removedBrokers);
+    startExecution(loadMonitor, null, removedBrokers, replicationThrottle);
   }
 
   private synchronized void initProposalExecution(Collection<ExecutionProposal> proposals,
@@ -348,6 +351,8 @@ public class Executor {
    * @param concurrentSwaps The number of concurrent swap operations per broker.
    * @param requestedLeadershipMovementConcurrency The maximum number of concurrent leader movements
    *                                               (if null, use num.concurrent.leader.movements).
+   * @param replicationThrottle The replication throttle (bytes/second) to apply to both leaders and followers
+   *                            while executing demotion proposals (if null, no throttling is applied).
    * @param replicaMovementStrategy The strategy used to determine the execution order of generated replica movement tasks.
    * @param uuid UUID of the execution.
    */
@@ -357,10 +362,11 @@ public class Executor {
                                                   Integer concurrentSwaps,
                                                   Integer requestedLeadershipMovementConcurrency,
                                                   ReplicaMovementStrategy replicaMovementStrategy,
+                                                  Long replicationThrottle,
                                                   String uuid) {
     initProposalExecution(proposals, demotedBrokers, loadMonitor, concurrentSwaps, 0, requestedLeadershipMovementConcurrency,
                           replicaMovementStrategy, uuid);
-    startExecution(loadMonitor, demotedBrokers, null);
+    startExecution(loadMonitor, demotedBrokers, null, replicationThrottle);
   }
 
   /**
@@ -431,8 +437,13 @@ public class Executor {
    * @param loadMonitor Load monitor.
    * @param demotedBrokers Brokers to be demoted, null if no broker has been demoted.
    * @param removedBrokers Brokers to be removed, null if no broker has been removed.
+   * @param replicationThrottle The replication throttle (bytes/second) to apply to both leaders and followers
+   *                            while moving partitions (if null, no throttling is applied).
    */
-  private void startExecution(LoadMonitor loadMonitor, Collection<Integer> demotedBrokers, Collection<Integer> removedBrokers) {
+  private void startExecution(LoadMonitor loadMonitor,
+                              Collection<Integer> demotedBrokers,
+                              Collection<Integer> removedBrokers,
+                              Long replicationThrottle) {
     _executionStoppedByUser.set(false);
     sanityCheckOngoingReplicaMovement();
     _hasOngoingExecution = true;
@@ -443,7 +454,8 @@ public class Executor {
     } else {
       _numExecutionStartedInNonKafkaAssignerMode.incrementAndGet();
     }
-    _proposalExecutor.submit(new ProposalExecutionRunnable(loadMonitor, demotedBrokers, removedBrokers));
+    _proposalExecutor.submit(
+            new ProposalExecutionRunnable(loadMonitor, demotedBrokers, removedBrokers, replicationThrottle));
   }
 
   /**
@@ -451,7 +463,7 @@ public class Executor {
    */
   private void sanityCheckOngoingReplicaMovement() {
     // Note that in case there is an ongoing partition reassignment, we do not unpause metric sampling.
-    if (!ExecutorUtils.partitionsBeingReassigned(_kafkaZkClient).isEmpty()) {
+    if (hasOngoingPartitionReassignments()) {
       _executionTaskManager.clear();
       _uuid = null;
       throw new IllegalStateException("There are ongoing inter-broker partition movements.");
@@ -513,8 +525,26 @@ public class Executor {
     LOG.info("Executor shutdown completed.");
   }
 
+  /**
+   * Whether there is an ongoing operation triggered by current Cruise Control deployment.
+   *
+   * @return True if there is an ongoing execution.
+   */
   public boolean hasOngoingExecution() {
     return _hasOngoingExecution;
+  }
+
+  /**
+   * Whether there is any ongoing partition reassignment.
+   * This method directly checks the existence of znode /admin/partition_reassignment.
+   * Note this method returning false does not guarantee that there is no ongoing execution because when there is an ongoing
+   * execution inside Cruise Control, partition reassignment task batches are writen to zookeeper periodically, there will be
+   * small intervals that /admin/partition_reassignment does not exist.
+   *
+   * @return True if there is any ongoing partition reassignment.
+   */
+  public boolean hasOngoingPartitionReassignments() {
+    return !ExecutorUtils.partitionsBeingReassigned(_kafkaZkClient).isEmpty();
   }
 
   /**
@@ -528,10 +558,14 @@ public class Executor {
     private ExecutorState.State _state;
     private Set<Integer> _recentlyDemotedBrokers;
     private Set<Integer> _recentlyRemovedBrokers;
+    private final Long _replicationThrottle;
     private final long _executionStartMs;
     private Throwable _executionException;
 
-    ProposalExecutionRunnable(LoadMonitor loadMonitor, Collection<Integer> demotedBrokers, Collection<Integer> removedBrokers) {
+    ProposalExecutionRunnable(LoadMonitor loadMonitor,
+                              Collection<Integer> demotedBrokers,
+                              Collection<Integer> removedBrokers,
+                              Long replicationThrottle) {
       _loadMonitor = loadMonitor;
       _state = NO_TASK_IN_PROGRESS;
       _executionStartMs = _time.milliseconds();
@@ -554,6 +588,7 @@ public class Executor {
       }
       _recentlyDemotedBrokers = recentlyDemotedBrokers();
       _recentlyRemovedBrokers = recentlyRemovedBrokers();
+      _replicationThrottle = replicationThrottle;
     }
 
     public void run() {
@@ -731,6 +766,7 @@ public class Executor {
     }
 
     private void interBrokerMoveReplicas() {
+      ReplicationThrottleHelper throttleHelper = new ReplicationThrottleHelper(_kafkaZkClient, _replicationThrottle);
       int numTotalPartitionMovements = _executionTaskManager.numRemainingInterBrokerPartitionMovements();
       long totalDataToMoveInMB = _executionTaskManager.remainingInterBrokerDataToMoveInMB();
       LOG.info("Starting {} inter-broker partition movements.", numTotalPartitionMovements);
@@ -743,12 +779,14 @@ public class Executor {
         LOG.info("Executor will execute {} task(s)", tasksToExecute.size());
 
         if (!tasksToExecute.isEmpty()) {
+          throttleHelper.setThrottles(
+              tasksToExecute.stream().map(ExecutionTask::proposal).collect(Collectors.toList()));
           // Execute the tasks.
           _executionTaskManager.markTasksInProgress(tasksToExecute);
           ExecutorUtils.executeReplicaReassignmentTasks(_kafkaZkClient, tasksToExecute);
         }
         // Wait indefinitely for partition movements to finish.
-        waitForExecutionTaskToFinish();
+        List<ExecutionTask> completedTasks = waitForExecutionTaskToFinish();
         partitionsToMove = _executionTaskManager.numRemainingInterBrokerPartitionMovements();
         int numFinishedPartitionMovements = _executionTaskManager.numFinishedInterBrokerPartitionMovements();
         long finishedDataMovementInMB = _executionTaskManager.finishedInterBrokerDataMovementInMB();
@@ -759,6 +797,7 @@ public class Executor {
                  finishedDataMovementInMB, totalDataToMoveInMB,
                  totalDataToMoveInMB == 0 ? 100 : String.format(java.util.Locale.US, "%.2f",
                                                   (finishedDataMovementInMB * 100.0) / totalDataToMoveInMB));
+        throttleHelper.clearThrottles(completedTasks, tasksToExecute.stream().filter(t -> t.state() == IN_PROGRESS).collect(Collectors.toList()));
       }
       // After the partition movement finishes, wait for the controller to clean the reassignment zkPath. This also
       // ensures a clean stop when the execution is stopped in the middle.
@@ -766,8 +805,9 @@ public class Executor {
       while (!inExecutionTasks.isEmpty()) {
         LOG.info("Waiting for {} tasks moving {} MB to finish.", inExecutionTasks.size(),
                  _executionTaskManager.inExecutionInterBrokerDataToMoveInMB());
-        waitForExecutionTaskToFinish();
+        List<ExecutionTask> completedRemainingTasks = waitForExecutionTaskToFinish();
         inExecutionTasks = _executionTaskManager.inExecutionTasks();
+        throttleHelper.clearThrottles(completedRemainingTasks, new ArrayList<>(inExecutionTasks));
       }
       if (_executionTaskManager.inExecutionTasks().isEmpty()) {
         LOG.info("Inter-broker partition movements finished.");
@@ -893,7 +933,7 @@ public class Executor {
     /**
      * This method periodically check zookeeper to see if the partition reassignment has finished or not.
      */
-    private void waitForExecutionTaskToFinish() {
+    private List<ExecutionTask> waitForExecutionTaskToFinish() {
       List<ExecutionTask> finishedTasks = new ArrayList<>();
       do {
         // If there is no finished tasks, we need to check if anything is blocked.
@@ -948,6 +988,7 @@ public class Executor {
         updateOngoingExecutionState();
       } while (!_executionTaskManager.inExecutionTasks().isEmpty() && finishedTasks.isEmpty());
       LOG.info("Completed tasks: {}", finishedTasks);
+      return finishedTasks;
     }
 
     /**

@@ -82,6 +82,7 @@ public class ParameterUtils {
   public static final String DRY_RUN_PARAM = "dryrun";
   public static final String THROTTLE_ADDED_BROKER_PARAM = "throttle_added_broker";
   public static final String THROTTLE_REMOVED_BROKER_PARAM = "throttle_removed_broker";
+  public static final String REPLICATION_THROTTLE_PARAM = "replication_throttle";
   public static final String IGNORE_PROPOSAL_CACHE_PARAM = "ignore_proposal_cache";
   public static final String USE_READY_DEFAULT_GOALS_PARAM = "use_ready_default_goals";
   public static final String CONCURRENT_PARTITION_MOVEMENTS_PER_BROKER_PARAM = "concurrent_partition_movements_per_broker";
@@ -148,6 +149,7 @@ public class ParameterUtils {
     partitionLoad.add(TOPIC_PARAM);
     partitionLoad.add(PARTITION_PARAM);
     partitionLoad.add(MIN_VALID_PARTITION_RATIO_PARAM);
+    partitionLoad.add(BROKER_ID_PARAM);
 
     Set<String> proposals = new TreeSet<>(String.CASE_INSENSITIVE_ORDER);
     proposals.add(VERBOSE_PARAM);
@@ -186,6 +188,7 @@ public class ParameterUtils {
     addRemoveOrFixBroker.add(EXCLUDE_RECENTLY_DEMOTED_BROKERS_PARAM);
     addRemoveOrFixBroker.add(EXCLUDE_RECENTLY_REMOVED_BROKERS_PARAM);
     addRemoveOrFixBroker.add(REPLICA_MOVEMENT_STRATEGIES_PARAM);
+    addRemoveOrFixBroker.add(REPLICATION_THROTTLE_PARAM);
     addRemoveOrFixBroker.add(REVIEW_ID_PARAM);
 
     Set<String> addBroker = new TreeSet<>(String.CASE_INSENSITIVE_ORDER);
@@ -214,6 +217,7 @@ public class ParameterUtils {
     demoteBroker.add(EXCLUDE_FOLLOWER_DEMOTION_PARAM);
     demoteBroker.add(EXCLUDE_RECENTLY_DEMOTED_BROKERS_PARAM);
     demoteBroker.add(REPLICA_MOVEMENT_STRATEGIES_PARAM);
+    demoteBroker.add(REPLICATION_THROTTLE_PARAM);
     demoteBroker.add(REVIEW_ID_PARAM);
     demoteBroker.add(BROKER_ID_AND_LOGDIRS_PARAM);
 
@@ -235,6 +239,7 @@ public class ParameterUtils {
     rebalance.add(EXCLUDE_RECENTLY_REMOVED_BROKERS_PARAM);
     rebalance.add(REPLICA_MOVEMENT_STRATEGIES_PARAM);
     rebalance.add(IGNORE_PROPOSAL_CACHE_PARAM);
+    rebalance.add(REPLICATION_THROTTLE_PARAM);
     rebalance.add(REVIEW_ID_PARAM);
     rebalance.add(DESTINATION_BROKER_IDS_PARAM);
     rebalance.add(REBALANCE_DISK_MODE_PARAM);
@@ -293,7 +298,19 @@ public class ParameterUtils {
     topicConfiguration.add(TOPIC_PARAM);
     topicConfiguration.add(REPLICATION_FACTOR_PARAM);
     topicConfiguration.add(SKIP_RACK_AWARENESS_CHECK_PARAM);
-    topicConfiguration.add(REVIEW_IDS_PARAM);
+    topicConfiguration.add(DRY_RUN_PARAM);
+    topicConfiguration.add(GOALS_PARAM);
+    topicConfiguration.add(DATA_FROM_PARAM);
+    topicConfiguration.add(SKIP_HARD_GOAL_CHECK_PARAM);
+    topicConfiguration.add(ALLOW_CAPACITY_ESTIMATION_PARAM);
+    topicConfiguration.add(CONCURRENT_LEADER_MOVEMENTS_PARAM);
+    topicConfiguration.add(CONCURRENT_PARTITION_MOVEMENTS_PER_BROKER_PARAM);
+    topicConfiguration.add(EXCLUDE_RECENTLY_DEMOTED_BROKERS_PARAM);
+    topicConfiguration.add(EXCLUDE_RECENTLY_REMOVED_BROKERS_PARAM);
+    topicConfiguration.add(REPLICA_MOVEMENT_STRATEGIES_PARAM);
+    topicConfiguration.add(REPLICATION_THROTTLE_PARAM);
+    topicConfiguration.add(VERBOSE_PARAM);
+    topicConfiguration.add(REVIEW_ID_PARAM);
 
     validParamNames.put(BOOTSTRAP, Collections.unmodifiableSet(bootstrap));
     validParamNames.put(TRAIN, Collections.unmodifiableSet(train));
@@ -486,6 +503,21 @@ public class ParameterUtils {
   static boolean throttleAddedOrRemovedBrokers(HttpServletRequest request, EndPoint endPoint) {
     return endPoint == ADD_BROKER ? getBooleanParam(request, THROTTLE_ADDED_BROKER_PARAM, true)
                                   : getBooleanParam(request, THROTTLE_REMOVED_BROKER_PARAM, true);
+  }
+
+  static Long replicationThrottle(HttpServletRequest request, KafkaCruiseControlConfig config) {
+    String parameterString = caseSensitiveParameterName(request.getParameterMap(), REPLICATION_THROTTLE_PARAM);
+    Long value;
+    if (parameterString == null) {
+      value = config.getLong(KafkaCruiseControlConfig.DEFAULT_REPLICATION_THROTTLE_CONFIG);
+    } else {
+      value = Long.parseLong(request.getParameter(parameterString));
+    }
+    if (value != null && value < 0) {
+      throw new IllegalArgumentException("The requested rebalance throttle must be non-negative (Requested: "
+              + value.toString() + ").");
+    }
+    return value;
   }
 
   static long time(HttpServletRequest request) {
@@ -697,10 +729,24 @@ public class ParameterUtils {
   }
 
   /**
+   * @param values Integer values
+   * @return A set of negative integer values contained in the given set.
+   */
+  private static Set<Integer> getNegatives(Set<Integer> values) {
+    return values.stream().filter(v -> v < 0).collect(Collectors.toCollection(() -> new HashSet<>(values.size())));
+  }
+
+  /**
    * Default: An empty set.
    */
   public static Set<Integer> reviewIds(HttpServletRequest request) throws UnsupportedEncodingException {
     Set<Integer> reviewIds = parseParamToIntegerSet(request, REVIEW_IDS_PARAM);
+    Set<Integer> negativeReviewIds = getNegatives(reviewIds);
+    if (!negativeReviewIds.isEmpty()) {
+      throw new UserRequestException(String.format("%s cannot contain negative values (requested: %s).",
+                                                   REVIEW_IDS_PARAM, negativeReviewIds));
+    }
+
     return Collections.unmodifiableSet(reviewIds);
   }
 
@@ -722,6 +768,8 @@ public class ParameterUtils {
       throw new UserRequestException(
           String.format("%s parameter must be mutually exclusive with other parameters (Request parameters: %s).",
                         REVIEW_ID_PARAM, request.getParameterMap()));
+    } else if (reviewId < 0) {
+      throw new UserRequestException(String.format("%s cannot be negative (requested: %d).", REVIEW_ID_PARAM, reviewId));
     }
 
     return reviewId;

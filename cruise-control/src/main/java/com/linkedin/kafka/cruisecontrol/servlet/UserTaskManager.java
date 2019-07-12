@@ -42,6 +42,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import static com.linkedin.kafka.cruisecontrol.KafkaCruiseControlUtils.OPERATION_LOGGER;
+import static com.linkedin.kafka.cruisecontrol.servlet.KafkaCruiseControlServletUtils.ensureHeaderNotPresent;
 import static com.linkedin.kafka.cruisecontrol.servlet.KafkaCruiseControlServletUtils.httpServletRequestToString;
 import static com.linkedin.kafka.cruisecontrol.servlet.parameters.ParameterUtils.REVIEW_ID_PARAM;
 
@@ -206,7 +207,7 @@ public class UserTaskManager implements Closeable {
    * @param step The index of the step that has to be added or fetched.
    * @param isAsyncRequest Indicate whether the task is async or sync.
    * @param parameters Parsed parameters from http request, or null if the parsing result is unavailable.
-   * @return The list of {@link OperationFuture} for the linked UserTask.
+   * @return An unmodifiable list of {@link OperationFuture} for the linked UserTask.
    */
   public List<OperationFuture> getOrCreateUserTask(HttpServletRequest httpServletRequest,
                                                    HttpServletResponse httpServletResponse,
@@ -221,16 +222,16 @@ public class UserTaskManager implements Closeable {
       LOG.info("Fetch an existing UserTask {}", userTaskId);
       httpServletResponse.setHeader(USER_TASK_HEADER_NAME, userTaskId.toString());
       if (step < userTaskInfo.futures().size()) {
-        return userTaskInfo.futures();
+        return Collections.unmodifiableList(userTaskInfo.futures());
       } else if (step == userTaskInfo.futures().size()) {
         LOG.info("Add a new future to existing UserTask {}", userTaskId);
-        return insertFuturesByUserTaskId(userTaskId, function, httpServletRequest, parameters).futures();
+        return Collections.unmodifiableList(insertFuturesByUserTaskId(userTaskId, function, httpServletRequest, parameters).futures());
       } else {
         throw new IllegalArgumentException(
             String.format("There are %d steps in the session. Cannot add step %d.", userTaskInfo.futures().size(), step));
       }
     } else {
-      ensureUserTaskHeaderNotPresent(USER_TASK_HEADER_NAME, httpServletRequest);
+      ensureHeaderNotPresent(httpServletRequest, USER_TASK_HEADER_NAME);
       if (step != 0) {
         throw new IllegalArgumentException(
             String.format("There are no step in the session. Cannot add step %d.", step));
@@ -243,16 +244,7 @@ public class UserTaskManager implements Closeable {
       }
 
       httpServletResponse.setHeader(USER_TASK_HEADER_NAME, userTaskId.toString());
-      return userTaskInfo.futures();
-    }
-  }
-
-  private void ensureUserTaskHeaderNotPresent(String headerName, HttpServletRequest httpServletRequest) {
-    if (httpServletRequest.getHeader(headerName) != null) {
-      // request provides user_task_header that user tasks doesn't exist then just throw exception
-      String userTaskIdFromRequest = httpServletRequest.getHeader(headerName);
-      throw new IllegalArgumentException(
-          String.format("UserTask %s is an invalid %s", userTaskIdFromRequest, headerName));
+      return Collections.unmodifiableList(userTaskInfo.futures());
     }
   }
 
@@ -446,7 +438,8 @@ public class UserTaskManager implements Closeable {
       }
     }
 
-    if (_inExecutionUserTaskInfo.userTaskId().equals(userTaskId)
+    if (_inExecutionUserTaskInfo != null
+        && _inExecutionUserTaskInfo.userTaskId().equals(userTaskId)
         && _inExecutionUserTaskInfo.requestUrl().equals(requestUrl)
         && hasTheSameHttpParameter(_inExecutionUserTaskInfo.queryParams(), httpServletRequest.getParameterMap())) {
       return _inExecutionUserTaskInfo;
