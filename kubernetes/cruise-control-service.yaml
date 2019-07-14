@@ -1,0 +1,40 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: cruisecontrol
+  labels:
+    app: cruisecontrol
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: cruisecontrol
+  template:
+    metadata:
+      labels:
+        app: cruisecontrol
+    spec:
+      containers:
+      - name: cruisecontrol
+        image: 494665118910.dkr.ecr.us-east-1.amazonaws.com/wx-cruise-control:V19
+        imagePullPolicy: Always
+        ports:
+        - containerPort: 9090
+      - name: cruisecontrol-ui
+        image: 494665118910.dkr.ecr.us-east-1.amazonaws.com/wx-cruise-control-ui:V14
+        imagePullPolicy: Always
+        ports:
+        - containerPort: 8090
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: cruisecontrol
+spec:
+  type: LoadBalancer
+  ports:
+  - name: cruisecontrol
+    port: 80
+    targetPort: 8090
+  selector:
+    app: cruisecontrol

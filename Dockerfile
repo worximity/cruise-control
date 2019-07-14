@@ -6,4 +6,4 @@ COPY . /project/wx-cruise-control
 
 EXPOSE 9090
 ENTRYPOINT [ "/project/wx-cruise-control/kafka-cruise-control-start.sh" ]
-CMD ["config/dev.properties"]
+CMD ["/project/wx-cruise-control/config/aws-labs.properties"]
