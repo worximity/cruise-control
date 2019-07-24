@@ -16,7 +16,7 @@ spec:
     spec:
       containers:
       - name: cruisecontrol
-        image: 494665118910.dkr.ecr.us-east-1.amazonaws.com/wx-cruise-control:V19
+        image: 494665118910.dkr.ecr.us-east-1.amazonaws.com/wx-cruise-control:V29
         imagePullPolicy: Always
         ports:
         - containerPort: 9090
